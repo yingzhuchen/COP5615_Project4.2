@@ -7,10 +7,11 @@
 -module(reddit_ops).
 -include("reddit.hrl").
 
--export([register_user/1, user_exists/1,
+-export([register_user/1, register_user/2, set_public_key/2, get_public_key/1, user_exists/1,
          create_sub/2, join_sub/2, leave_sub/2,
          user_subs/1, sub_members/1, sub_member_count/1,
-         create_post/4, repost/3, comment/3, vote/3, get_karma/1,
+         create_post/4, create_signed_post/5, repost/3, repost_signed/4,
+         comment/3, vote/3, get_karma/1,
          get_feed/3, get_post/1, post_view/1, item_author/1,
          send_dm/3, reply_dm/3, get_dms/2,
          connect/2, disconnect/1, online_pid/1,
@@ -25,6 +26,38 @@ register_user(User) when is_binary(User), User =/= <<>> ->
     end;
 register_user(_) ->
     {error, invalid_name}.
+
+register_user(User, <<>>) ->
+    register_user(User);
+register_user(User, Pem) ->
+    case ets:insert_new(reddit_users, {User, now_ms()}) of
+        true ->
+            case set_public_key(User, Pem) of
+                ok -> ets:insert(reddit_karma, {User, 0, 0}), ok;
+                {error, _} = Error ->
+                    ets:delete(reddit_users, User),
+                    Error
+            end;
+        false -> {error, already_registered}
+    end.
+
+set_public_key(User, Pem) ->
+    case user_exists(User) of
+        true ->
+            case reddit_signature:decode_public_key(Pem) of
+                {ok, _} ->
+                    ets:insert(reddit_public_keys, {User, Pem}),
+                    ok;
+                {error, _} = Error -> Error
+            end;
+        false -> {error, no_such_user}
+    end.
+
+get_public_key(User) ->
+    case ets:lookup(reddit_public_keys, User) of
+        [{_, Pem}] -> {ok, #{user => User, public_key => Pem}};
+        [] -> {error, no_public_key}
+    end.
 
 user_exists(User) -> ets:member(reddit_users, User).
 
@@ -85,7 +118,19 @@ sub_member_count(Sub) ->
 %% ------------------------------------------------------------------- posts
 
 create_post(User, Sub, Title, Body) ->
-    do_post(User, Sub, Title, Body, undefined).
+    do_post(User, Sub, Title, Body, undefined, undefined).
+
+create_signed_post(User, Sub, Title, Body, Signature) ->
+    case ets:lookup(reddit_public_keys, User) of
+        [{_, Pem}] ->
+            Payload = reddit_signature:payload(User, Sub, Title, Body),
+            case is_binary(Signature) andalso
+                 reddit_signature:verify(Pem, Payload, Signature) of
+                true -> do_post(User, Sub, Title, Body, undefined, Signature);
+                false -> {error, invalid_signature}
+            end;
+        [] -> {error, no_public_key}
+    end.
 
 %% A repost copies the original's title and body into another (or the same)
 %% subreddit and keeps a link to the root original.
@@ -93,12 +138,29 @@ repost(User, Sub, OrigId) ->
     case ets:lookup(reddit_posts, OrigId) of
         [{_, #post{title = T, body = B, repost_of = R}}] ->
             Root = case R of undefined -> OrigId; _ -> R end,
-            do_post(User, Sub, T, B, Root);
+            do_post(User, Sub, T, B, Root, undefined);
         [] ->
             {error, no_such_post}
     end.
 
-do_post(User, Sub, Title, Body, RepostOf) ->
+repost_signed(User, Sub, OrigId, Signature) ->
+    case ets:lookup(reddit_posts, OrigId) of
+        [{_, #post{title = T, body = B, repost_of = R}}] ->
+            Root = case R of undefined -> OrigId; _ -> R end,
+            case ets:lookup(reddit_public_keys, User) of
+                [{_, Pem}] ->
+                    Payload = reddit_signature:payload(User, Sub, T, B),
+                    case is_binary(Signature) andalso
+                         reddit_signature:verify(Pem, Payload, Signature) of
+                        true -> do_post(User, Sub, T, B, Root, Signature);
+                        false -> {error, invalid_signature}
+                    end;
+                [] -> {error, no_public_key}
+            end;
+        [] -> {error, no_such_post}
+    end.
+
+do_post(User, Sub, Title, Body, RepostOf, Signature) ->
     guard(fun() ->
         need_user(User),
         need_sub(Sub),
@@ -107,7 +169,7 @@ do_post(User, Sub, Title, Body, RepostOf) ->
         ets:member(reddit_user_subs, {User, Sub}) orelse throw({error, not_member}),
         Id = next_id(item),
         P = #post{id = Id, sub = Sub, author = User, title = Title, body = Body,
-                  created = now_ms(), repost_of = RepostOf},
+                  created = now_ms(), repost_of = RepostOf, signature = Signature},
         ets:insert(reddit_posts, {Id, P}),
         ets:insert(reddit_scores, {Id, 0, 0, User, post, 0}),
         ets:insert(reddit_sub_posts, {{Sub, Id}}),   % last: makes it visible in feeds
@@ -120,9 +182,25 @@ post_view(Id) ->
             #{id => Id, sub => P#post.sub, author => P#post.author,
               title => P#post.title, body => P#post.body,
               created => P#post.created, repost_of => P#post.repost_of,
-              up => Up, down => Down, score => Up - Down, num_comments => NC};
+              up => Up, down => Down, score => Up - Down, num_comments => NC,
+              signature => P#post.signature,
+              signature_status => signature_status(P)};
         _ ->
             undefined
+    end.
+
+signature_status(#post{signature = undefined}) ->
+    unsigned;
+signature_status(#post{author = Author, sub = Sub, title = Title,
+                       body = Body, signature = Signature}) ->
+    case ets:lookup(reddit_public_keys, Author) of
+        [{_, Pem}] ->
+            Payload = reddit_signature:payload(Author, Sub, Title, Body),
+            case reddit_signature:verify(Pem, Payload, Signature) of
+                true -> valid;
+                false -> invalid
+            end;
+        [] -> missing_public_key
     end.
 
 %% A post together with its full comment tree.

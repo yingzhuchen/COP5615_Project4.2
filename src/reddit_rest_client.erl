@@ -1,7 +1,8 @@
 %% Simple client used by the Project 4.2 REST demo.
 -module(reddit_rest_client).
--export([start/1, register/2, create_sub/3, join_sub/3, leave_sub/3,
-         post/5, repost/4, comment/4, vote/4, feed/3, post_view/2,
+-export([start/1, register/2, register/3, public_key/2,
+         create_sub/3, join_sub/3, leave_sub/3,
+         post/5, post/6, repost/4, repost/5, comment/4, vote/4, feed/3, post_view/2,
          karma/2, send_dm/4, reply_dm/4, dms/2]).
 
 start(Base) ->
@@ -9,6 +10,10 @@ start(Base) ->
     Base.
 
 register(Base, User) -> request(post, Base ++ "/api/users", #{user => User}).
+register(Base, User, PublicKey) ->
+    request(post, Base ++ "/api/users", #{user => User, public_key => PublicKey}).
+public_key(Base, User) ->
+    request(get, Base ++ "/api/users/" ++ enc(User) ++ "/public_key").
 create_sub(Base, User, Sub) ->
     request(post, Base ++ "/api/subreddits/create", #{user => User, sub => Sub}).
 join_sub(Base, User, Sub) ->
@@ -18,9 +23,17 @@ leave_sub(Base, User, Sub) ->
 post(Base, User, Sub, Title, Body) ->
     request(post, Base ++ "/api/posts",
             #{user => User, sub => Sub, title => Title, body => Body}).
+post(Base, User, Sub, Title, Body, Signature) ->
+    request(post, Base ++ "/api/posts",
+            #{user => User, sub => Sub, title => Title, body => Body,
+              signature => Signature}).
 repost(Base, User, Sub, Id) ->
     request(post, Base ++ "/api/reposts",
             #{user => User, sub => Sub, post_id => integer_to_binary(Id)}).
+repost(Base, User, Sub, Id, Signature) ->
+    request(post, Base ++ "/api/reposts",
+            #{user => User, sub => Sub, post_id => integer_to_binary(Id),
+              signature => Signature}).
 comment(Base, User, ParentId, Body) ->
     request(post, Base ++ "/api/comments",
             #{user => User, parent_id => integer_to_binary(ParentId), body => Body}).
@@ -74,5 +87,7 @@ enc_chars(Value) ->
                        $= -> "%3D";
                        $+ -> "%2B";
                        $\s -> "+";
+                       $\n -> "%0A";
+                       $\r -> "%0D";
                        _ -> [C]
                    end || C <- Value]).

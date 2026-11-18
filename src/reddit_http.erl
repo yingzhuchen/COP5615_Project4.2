@@ -111,13 +111,16 @@ route(get, <<"/api/messages">>, Query, _Body) ->
         call(User, {get_dms, User, int(maps:get(<<"limit">>, Query, <<"20">>))})
     end);
 route(get, Path, _Query, _Body) ->
-    case path_id(Path, <<"/api/posts/">>) of
-        {ok, Id} -> call(<<>>, {get_post, <<>>, Id});
-        error -> {404, #{error => not_found}}
+    case public_key_path(Path) of
+        {ok, User} -> call(User, {get_public_key, User});
+        error -> route_not_post(Path)
     end;
 route(post, <<"/api/users">>, _Query, Body) ->
     Params = parse_params(Body),
-    call(<<>>, {register, required(Params, <<"user">>)});
+    case maps:get(<<"public_key">>, Params, <<>>) of
+        <<>> -> call(<<>>, {register, required(Params, <<"user">>)});
+        Pem -> call(<<>>, {register_signed, required(Params, <<"user">>), Pem})
+    end;
 route(post, <<"/api/subreddits/create">>, _Query, Body) ->
     user_call(parse_params(Body), fun(U, P) ->
         {create_sub, U, required(P, <<"sub">>)}
@@ -132,12 +135,21 @@ route(post, <<"/api/subreddits/leave">>, _Query, Body) ->
     end);
 route(post, <<"/api/posts">>, _Query, Body) ->
     user_call(parse_params(Body), fun(U, P) ->
-        {post, U, required(P, <<"sub">>), required(P, <<"title">>),
-         required(P, <<"body">>)}
+        case maps:get(<<"signature">>, P, <<>>) of
+            <<>> -> {post, U, required(P, <<"sub">>), required(P, <<"title">>),
+                     required(P, <<"body">>)};
+            Signature -> {post_signed, U, required(P, <<"sub">>),
+                          required(P, <<"title">>), required(P, <<"body">>), Signature}
+        end
     end);
 route(post, <<"/api/reposts">>, _Query, Body) ->
     user_call(parse_params(Body), fun(U, P) ->
-        {repost, U, required(P, <<"sub">>), int(required(P, <<"post_id">>))}
+        case maps:get(<<"signature">>, P, <<>>) of
+            <<>> -> {repost, U, required(P, <<"sub">>),
+                     int(required(P, <<"post_id">>))};
+            Signature -> {repost_signed, U, required(P, <<"sub">>),
+                          int(required(P, <<"post_id">>)), Signature}
+        end
     end);
 route(post, <<"/api/comments">>, _Query, Body) ->
     user_call(parse_params(Body), fun(U, P) ->
@@ -199,6 +211,32 @@ path_id(Path, Prefix) ->
                 Start = byte_size(Prefix),
                 {ok, binary_to_integer(binary:part(Path, Start, byte_size(Path) - Start))}
             catch error:badarg -> error
+            end;
+        nomatch -> error
+    end.
+
+route_not_post(Path) ->
+    case path_id(Path, <<"/api/posts/">>) of
+        {ok, Id} -> call(<<>>, {get_post, <<>>, Id});
+        error -> {404, #{error => not_found}}
+    end.
+
+public_key_path(Path) ->
+    Prefix = <<"/api/users/">>,
+    Suffix = <<"/public_key">>,
+    case binary:match(Path, Prefix) of
+        {0, _} ->
+            Start = byte_size(Prefix),
+            case byte_size(Path) >= Start + byte_size(Suffix) of
+                true ->
+                    End = byte_size(Path) - byte_size(Suffix),
+                    case binary:part(Path, End, byte_size(Suffix)) of
+                        Suffix ->
+                            User = url_decode(binary:part(Path, Start, End - Start)),
+                            case User of <<>> -> error; _ -> {ok, User} end;
+                        _ -> error
+                    end;
+                false -> error
             end;
         nomatch -> error
     end.

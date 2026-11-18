@@ -11,7 +11,8 @@
     title,                 % binary
     body,                  % binary, plain text
     created,               % ms since epoch
-    repost_of = undefined  % id of the original post, or undefined
+    repost_of = undefined, % id of the original post, or undefined
+    signature = undefined  % base64-encoded RSA-SHA256 signature
 }).
 
 -record(comment, {

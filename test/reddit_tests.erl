@@ -14,6 +14,7 @@ ops_test_() ->
       fun nested_comments/0,
       fun votes_and_karma/0,
       fun reposts/0,
+      fun signed_posts/0,
       fun direct_messages/0]}.
 
 engine_test_() ->
@@ -108,6 +109,24 @@ reposts() ->
     ?assertMatch(#{repost_of := P, title := <<"orig">>, sub := <<"b">>},
                  reddit_ops:post_view(R1)),
     ?assertMatch(#{repost_of := P}, reddit_ops:post_view(R2)).
+
+signed_posts() ->
+    {Pem, Private} = reddit_signature:generate_key_pair(),
+    ?assertEqual(ok, reddit_ops:register_user(<<"alice">>, Pem)),
+    ?assertMatch({ok, #{public_key := Pem}}, reddit_ops:get_public_key(<<"alice">>)),
+    ok = reddit_ops:create_sub(<<"alice">>, <<"signed">>),
+    User = <<"alice">>,
+    Sub = <<"signed">>,
+    Title = <<"signed post">>,
+    Body = <<"verified by RSA-SHA256">>,
+    Payload = reddit_signature:payload(User, Sub, Title, Body),
+    Signature = reddit_signature:sign(Private, Payload),
+    {ok, PostId} = reddit_ops:create_signed_post(User, Sub, Title, Body, Signature),
+    ?assertMatch(#{signature_status := valid, signature := Signature},
+                 reddit_ops:post_view(PostId)),
+    ?assertEqual({error, invalid_signature},
+                 reddit_ops:create_signed_post(User, Sub, <<"bad">>, Body,
+                                               <<"not-a-signature">>)).
 
 direct_messages() ->
     users([<<"alice">>, <<"bob">>, <<"carol">>]),

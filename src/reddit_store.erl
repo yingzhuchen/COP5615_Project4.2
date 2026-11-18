@@ -27,6 +27,7 @@
 %%  reddit_inbox        {{ToUser, DmId}}
 %%  reddit_online       {User, ClientPid}
 %%  reddit_ids          {CounterName, Value}     (id counters, push counters)
+%%  reddit_public_keys  {User, PemPublicKey}
 tables() ->
     [{reddit_users, set},
      {reddit_karma, set},
@@ -43,6 +44,7 @@ tables() ->
      {reddit_dms, set},
      {reddit_inbox, ordered_set},
      {reddit_online, set},
+     {reddit_public_keys, set},
      {reddit_ids, set}].
 
 start() ->

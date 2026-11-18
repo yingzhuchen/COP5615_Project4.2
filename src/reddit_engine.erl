@@ -82,6 +82,9 @@ handle_info(_Msg, S) -> {noreply, S}.
 %% --------------------------------------------------------------- requests
 
 request({register, U}) -> reddit_ops:register_user(U);
+request({register_signed, U, Pem}) -> reddit_ops:register_user(U, Pem);
+request({set_public_key, U, Pem}) -> reddit_ops:set_public_key(U, Pem);
+request({get_public_key, U}) -> reddit_ops:get_public_key(U);
 request({connect, U, Pid}) -> reddit_ops:connect(U, Pid);
 request({disconnect, U}) -> reddit_ops:disconnect(U);
 request({create_sub, U, Sub}) -> reddit_ops:create_sub(U, Sub);
@@ -89,8 +92,12 @@ request({join_sub, U, Sub}) -> reddit_ops:join_sub(U, Sub);
 request({leave_sub, U, Sub}) -> reddit_ops:leave_sub(U, Sub);
 request({post, U, Sub, Title, Body}) ->
     after_post(reddit_ops:create_post(U, Sub, Title, Body), U, Sub);
+request({post_signed, U, Sub, Title, Body, Signature}) ->
+    after_post(reddit_ops:create_signed_post(U, Sub, Title, Body, Signature), U, Sub);
 request({repost, U, Sub, OrigId}) ->
     after_post(reddit_ops:repost(U, Sub, OrigId), U, Sub);
+request({repost_signed, U, Sub, OrigId, Signature}) ->
+    after_post(reddit_ops:repost_signed(U, Sub, OrigId, Signature), U, Sub);
 request({comment, U, Parent, Body}) ->
     R = reddit_ops:comment(U, Parent, Body),
     case R of
