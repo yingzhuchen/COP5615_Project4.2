@@ -1,9 +1,9 @@
 # COP5615_Project4.1
 Team members: Qing Li (16912349)
 
-A Reddit clone engine and a client tester/simulator, written in Erlang/OTP
-(part I: engine + simulator, no REST/WebSocket layer yet). Performance
-results are in [REPORT.md](REPORT.md).
+A Reddit clone engine, simulator, REST server, and REST client written in
+Erlang/OTP. Performance results from the engine simulator are in
+[REPORT.md](REPORT.md).
 
 ## What is implemented
 
@@ -57,6 +57,10 @@ src/reddit_report.erl   performance report
 src/reddit_zipf.erl     Zipf sampler
 src/reddit_stats.erl    mergeable latency histograms
 test/reddit_tests.erl   engine unit tests
+src/reddit_http.erl     dependency-free REST server
+src/reddit_json.erl     JSON response encoder
+src/reddit_rest_client.erl REST client
+src/reddit_rest_demo.erl REST demo client
 ```
 
 ### Design
@@ -73,8 +77,8 @@ test/reddit_tests.erl   engine unit tests
   on other machines too.
 - **Push fan-out** for new posts is batched: one message per client node,
   forwarded locally by that node's `reddit_relay` process.
-- `reddit_ops` knows nothing about processes or transport. Part II can put
-  a REST/WebSocket layer in front of it without changes.
+- `reddit_ops` knows nothing about processes or transport. The REST layer
+  calls the same engine workers without changing the engine logic.
 
 ## How to run
 
@@ -97,6 +101,45 @@ Linux / macOS / Git Bash:
 ```
 
 The report is printed and also saved to `results/run_<users>u_<clients>c_<secs>s_<time>.txt`.
+
+## Project 4.2 REST API
+
+Project 4.2 adds a dependency-free HTTP/REST layer on top of the same engine.
+The API uses `application/x-www-form-urlencoded` request bodies and returns
+JSON responses. Start it with:
+
+```bash
+./run.sh api 8080
+```
+
+In another terminal, run the REST client demonstration:
+
+```bash
+./run.sh demo http://localhost:8080
+```
+
+Supported endpoints:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/users` | Register a user (`user`) |
+| POST | `/api/subreddits/create` | Create a subreddit (`user`, `sub`) |
+| POST | `/api/subreddits/join` | Join a subreddit |
+| POST | `/api/subreddits/leave` | Leave a subreddit |
+| POST | `/api/posts` | Create a text post |
+| POST | `/api/reposts` | Repost a post |
+| POST | `/api/comments` | Add a comment or reply |
+| POST | `/api/votes` | Upvote, downvote, or withdraw |
+| GET | `/api/feed?user=...&limit=...&sort=...` | Get a feed |
+| GET | `/api/posts/<id>` | Get a post and comment tree |
+| GET | `/api/karma?user=...` | Get Karma |
+| POST | `/api/messages` | Send a direct message |
+| POST | `/api/messages/reply` | Reply to a direct message |
+| GET | `/api/messages?user=...` | List direct messages |
+
+The REST server calls the existing engine workers, so the engine remains
+separate from the client and transport layer. `src/reddit_rest_client.erl`
+is the simple client used by the demo and logs each REST operation.
 
 ### Clients started by hand (or on other machines)
 

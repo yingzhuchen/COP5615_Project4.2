@@ -6,6 +6,8 @@
 #   ./run.sh sim [key value ...]        engine + client processes on this machine
 #   ./run.sh engine clients N [...]     engine only; waits for N external clients
 #   ./run.sh client ENGINE_NODE         one client process (e.g. engine@myhost)
+#   ./run.sh api [PORT]                 engine + REST API server
+#   ./run.sh demo [BASE_URL]            REST API client demonstration
 #
 # Example: ./run.sh sim users 20000 clients 4 duration 60
 set -e
@@ -37,6 +39,14 @@ case "$cmd" in
     client)
         build
         erl -sname "client$$" "${ERL_FLAGS_COMMON[@]}" -run reddit_sim main "$1"
+        ;;
+    api)
+        build
+        erl -sname api "${ERL_FLAGS_COMMON[@]}" -run reddit_api_main main "$@"
+        ;;
+    demo)
+        build
+        erl -noshell -pa ebin -run reddit_rest_demo main "$@"
         ;;
     *)
         echo "unknown command: $cmd" >&2
