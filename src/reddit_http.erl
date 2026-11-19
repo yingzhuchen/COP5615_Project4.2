@@ -19,9 +19,11 @@ stop() ->
         Pid -> exit(Pid, shutdown), unregister(?NAME), ok
     end.
 
+%% The gen_tcp default backlog of 5 makes Windows refuse connections when
+%% many clients connect at the same moment, so allow a long accept queue.
 listen(Port) ->
     {ok, Socket} = gen_tcp:listen(Port, [binary, {packet, 0}, {active, false},
-                                         {reuseaddr, true}]),
+                                         {reuseaddr, true}, {backlog, 1024}]),
     accept(Socket).
 
 accept(Socket) ->

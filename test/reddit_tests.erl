@@ -33,7 +33,7 @@ websocket_test_() ->
              ok
      end,
      fun(_) -> reddit_http:stop(), reddit_engine:stop() end,
-     [fun websocket_session/0]}.
+     [fun websocket_session/0, fun burst_connections/0]}.
 
 users(Names) -> [ok = reddit_ops:register_user(N) || N <- Names].
 
@@ -260,3 +260,31 @@ websocket_session() ->
     reddit_ws_client:close(A),
     reddit_ws_client:close(B),
     timer:sleep(100).
+
+%% Many clients connecting at the same moment must all be served. With the
+%% gen_tcp default listen backlog (5), Windows refused most of such a burst.
+burst_connections() ->
+    wait_listening(?WS_PORT, 40),
+    N = 200,
+    Parent = self(),
+    Pids = [spawn(fun() ->
+                          receive go -> ok end,
+                          Parent ! {burst, self(), health_check(?WS_PORT)}
+                  end) || _ <- lists:seq(1, N)],
+    [P ! go || P <- Pids],
+    Results = [receive {burst, P, R} -> R after 15000 -> timeout end || P <- Pids],
+    ?assertEqual([], [R || R <- Results, R =/= ok]).
+
+health_check(Port) ->
+    case gen_tcp:connect("localhost", Port, [binary, {active, false}], 10000) of
+        {ok, S} ->
+            ok = gen_tcp:send(S, <<"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n">>),
+            R = gen_tcp:recv(S, 0, 10000),
+            gen_tcp:close(S),
+            case R of
+                {ok, <<"HTTP/1.1 200", _/binary>>} -> ok;
+                Other -> Other
+            end;
+        Error ->
+            Error
+    end.
