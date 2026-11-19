@@ -8,6 +8,8 @@
 #   ./run.sh client ENGINE_NODE         one client process (e.g. engine@myhost)
 #   ./run.sh api [PORT]                 engine + REST API server
 #   ./run.sh demo [BASE_URL]            REST API client demonstration
+#   ./run.sh ws [WS_URL] [USER]         interactive WebSocket client
+#   ./run.sh wsdemo [WS_URL]            scripted multi-client WebSocket demo
 #
 # Example: ./run.sh sim users 20000 clients 4 duration 60
 set -e
@@ -47,6 +49,14 @@ case "$cmd" in
     demo)
         build
         erl -noshell -pa ebin -run reddit_rest_demo main "$@"
+        ;;
+    ws)
+        build
+        erl -noshell -pa ebin -run reddit_ws_cli main "$@"
+        ;;
+    wsdemo)
+        build
+        erl -noshell -pa ebin -run reddit_ws_demo main "$@"
         ;;
     *)
         echo "unknown command: $cmd" >&2

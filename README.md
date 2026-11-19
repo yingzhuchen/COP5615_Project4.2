@@ -63,6 +63,10 @@ src/reddit_http.erl     dependency-free REST server
 src/reddit_json.erl     JSON response encoder
 src/reddit_rest_client.erl REST client
 src/reddit_rest_demo.erl REST demo client
+src/reddit_ws.erl        WebSocket server (handshake, framing, JSON commands, live pushes)
+src/reddit_ws_client.erl WebSocket client library
+src/reddit_ws_cli.erl    interactive command-line WebSocket client
+src/reddit_ws_demo.erl   scripted multi-client WebSocket demo
 ```
 
 ### Design
@@ -149,6 +153,88 @@ Bonus registration and posting parameters:
 The REST server calls the existing engine workers, so the engine remains
 separate from the client and transport layer. `src/reddit_rest_client.erl`
 is the simple client used by the demo and logs each REST operation.
+
+## Project 4.2 WebSocket interface
+
+The same server also speaks WebSocket (RFC 6455) at `ws://HOST:PORT/ws`,
+implemented without dependencies on `gen_tcp`. A client sends one JSON
+command per text frame and gets one JSON reply with the same `ref`:
+
+```
+-> {"ref": 4, "action": "post", "sub": "erlang", "title": "Hi", "body": "...", "signature": "..."}
+<- {"ref": 4, "ok": true, "data": {"id": 12}}
+-> {"ref": 5, "action": "join_sub", "sub": "nope"}
+<- {"ref": 5, "ok": false, "error": "no_such_sub"}
+```
+
+After `login`, the connection is that user's live session: the engine pushes
+events to it at any time, with no request needed. Offline users catch up
+through `get_feed` and `get_dms` when they log in again.
+
+```
+<- {"push": "new_post", "data": {...post...}}            new post in a joined subreddit
+<- {"push": "reply", "data": {"comment_id": 9, "parent": 5, "from": "bob"}}
+<- {"push": "dm", "data": {"id": 3, "from": "bob"}}
+```
+
+| Action | Fields | Needs login |
+|---|---|---|
+| `register` | `user`, optional `public_key` (PEM) | no |
+| `login` / `logout` | `user` / – | no |
+| `get_post` | `post_id` (post with its comment tree and `signature_status`) | no |
+| `get_public_key` | `user` | no |
+| `create_sub`, `join_sub`, `leave_sub` | `sub` | yes |
+| `post` | `sub`, `title`, `body`, optional `signature` | yes |
+| `repost` | `sub`, `post_id`, optional `signature` | yes |
+| `comment` | `parent_id` (post or comment), `body` | yes |
+| `vote` | `item_id`, `direction` (`up`, `down`, `none`) | yes |
+| `get_feed` | optional `sort` (`hot`, `new`, `top`), `limit` | yes |
+| `get_karma` | optional `user` (default: yourself) | yes |
+| `send_dm`, `reply_dm`, `get_dms` | `to`, `body` / `dm_id`, `body` / optional `limit` | yes |
+
+Start the server (REST and WebSocket on one port; new-post pushes are on
+by default, `push_posts false` turns them off):
+
+```bash
+./run.sh api 8080
+```
+
+**Interactive client.** Run it in several terminals; each one is a separate
+client OS process. Given a user name, it logs in, or registers first if
+the user is new. Registering creates an RSA-2048 key pair, uploads the
+public key and saves the private key in `keys/<user>.pem`, so later posts
+are signed. Type `help` for the commands and `trace on` to see the raw
+JSON frames.
+
+```bash
+./run.sh ws ws://localhost:8080/ws alice     # terminal 2
+./run.sh ws ws://localhost:8080/ws bob       # terminal 3
+```
+
+```
+alice> create erlang
+bob> join erlang
+alice> post erlang "Hello" first post over WebSocket
+bob>                                     <- arrives in bob's terminal at once:
+*** new post in r/erlang by alice: #1 "Hello" [signature valid]
+bob> comment 1 nice post
+bob> dm alice hi there
+bob> feed new
+bob> show 1
+```
+
+**Scripted demo.** Three users on three connections use every action. Each
+live push is checked, error cases are shown, and the JSON frames are
+printed. It exits with status 0 when everything worked.
+
+```bash
+./run.sh wsdemo ws://localhost:8080/ws
+```
+
+On Windows PowerShell use `.\run.ps1 api 8080`, `.\run.ps1 ws ...` and
+`.\run.ps1 wsdemo ...`. If PowerShell reports that running scripts is
+disabled, use Git Bash with `./run.sh`, or start the script with
+`powershell -ExecutionPolicy Bypass -File .\run.ps1 ...`.
 
 ## Bonus: signed posts
 

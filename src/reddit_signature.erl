@@ -2,6 +2,7 @@
 -module(reddit_signature).
 -include_lib("public_key/include/public_key.hrl").
 -export([generate_key_pair/0, encode_public_key/1, decode_public_key/1,
+         encode_private_key/1, decode_private_key/1,
          sign/2, verify/3, payload/4]).
 
 generate_key_pair() ->
@@ -25,6 +26,18 @@ decode_public_key(Pem) when is_binary(Pem) ->
     end;
 decode_public_key(_) ->
     {error, invalid_public_key}.
+
+%% PEM text for a private key, so a client can keep it in a local file.
+encode_private_key(Private = #'RSAPrivateKey'{}) ->
+    public_key:pem_encode([public_key:pem_entry_encode('RSAPrivateKey', Private)]).
+
+decode_private_key(Pem) ->
+    try
+        [Entry | _] = public_key:pem_decode(Pem),
+        {ok, public_key:pem_entry_decode(Entry)}
+    catch
+        _:_ -> {error, invalid_private_key}
+    end.
 
 sign(Private, Payload) ->
     application:ensure_all_started(public_key),

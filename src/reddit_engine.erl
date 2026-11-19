@@ -15,7 +15,7 @@
 -behaviour(gen_server).
 -include("reddit.hrl").
 
--export([start/1, start/2, stop/0, num_workers/0, worker_name/1,
+-export([start/1, start/2, stop/0, num_workers/0, worker_name/1, call/2,
          collect_stats/0, reset_stats/0, request/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -38,6 +38,11 @@ stop() ->
 num_workers() -> persistent_term:get(reddit_workers).
 
 worker_name(I) -> list_to_atom("reddit_w" ++ integer_to_list(I)).
+
+%% A request from a front end running on the engine node (REST, WebSocket),
+%% sent to the worker that owns User, like reddit_client does remotely.
+call(User, Request) ->
+    gen_server:call(worker_name(erlang:phash2(User, num_workers()) + 1), Request, 30000).
 
 %% Per-operation server-side stats: #{Op => {Count, TotalServiceMicros}}.
 collect_stats() ->

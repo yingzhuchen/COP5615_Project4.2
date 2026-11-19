@@ -1,4 +1,5 @@
-%% Dependency-free REST server for the Project 4.1 engine.
+%% Dependency-free REST server for the Project 4.1 engine. The same port
+%% also accepts WebSocket connections on /ws (see reddit_ws).
 -module(reddit_http).
 -export([start/0, start/1, stop/0]).
 
@@ -26,7 +27,13 @@ listen(Port) ->
 accept(Socket) ->
     case gen_tcp:accept(Socket) of
         {ok, Client} ->
-            spawn(fun() -> handle(Client) end),
+            %% The handler must own the socket: a WebSocket session receives
+            %% its TCP data as messages, next to the engine's live pushes.
+            Pid = spawn(fun() -> receive {go, S} -> handle(S) end end),
+            case gen_tcp:controlling_process(Client, Pid) of
+                ok -> Pid ! {go, Client};
+                {error, _} -> exit(Pid, kill), gen_tcp:close(Client)
+            end,
             accept(Socket);
         {error, closed} -> ok;
         {error, _} -> accept(Socket)
@@ -37,6 +44,10 @@ handle(Socket) ->
                  case read_request(Socket) of
                      {ok, Method, Path, Query, Body} ->
                          route(Method, Path, Query, Body);
+                     {upgrade, <<"/ws">>, Headers, Rest} ->
+                         {websocket, Headers, Rest};
+                     {upgrade, _Path, _Headers, _Rest} ->
+                         {404, #{error => not_found}};
                      _ ->
                          {400, #{error => bad_request}}
                  end
@@ -45,8 +56,13 @@ handle(Socket) ->
                  error:Reason -> {500, #{error => iolist_to_binary(
                                                    io_lib:format("~p", [Reason]))}}
              end,
-    send_response(Socket, Result),
-    gen_tcp:close(Socket).
+    case Result of
+        {websocket, WsHeaders, WsRest} ->
+            reddit_ws:serve(Socket, WsHeaders, WsRest);
+        _ ->
+            send_response(Socket, Result),
+            gen_tcp:close(Socket)
+    end.
 
 read_request(Socket) ->
     case recv_headers(Socket, <<>>) of
@@ -56,12 +72,22 @@ read_request(Socket) ->
             [Method0, Target0 | _] =
                 string:lexemes(binary_to_list(RequestLine), " "),
             Headers = headers(HeaderLines, #{}),
-            Length = binary_to_integer(maps:get(<<"content-length">>, Headers, <<"0">>)),
-            {ok, Body} = recv_body(Socket, Rest, Length),
             {Path, Query} = split_target(list_to_binary(Target0)),
-            {ok, list_to_atom(string:lowercase(Method0)), Path, Query, Body};
+            Method = list_to_atom(string:lowercase(Method0)),
+            case Method =:= get andalso websocket_upgrade(Headers) of
+                true ->
+                    {upgrade, Path, Headers, Rest};
+                false ->
+                    Length = binary_to_integer(
+                               maps:get(<<"content-length">>, Headers, <<"0">>)),
+                    {ok, Body} = recv_body(Socket, Rest, Length),
+                    {ok, Method, Path, Query, Body}
+            end;
         Error -> Error
     end.
+
+websocket_upgrade(Headers) ->
+    string:lowercase(maps:get(<<"upgrade">>, Headers, <<>>)) =:= <<"websocket">>.
 
 recv_headers(Socket, Acc) ->
     case binary:match(Acc, <<"\r\n\r\n">>) of
@@ -178,9 +204,7 @@ user_call(Params, Fun) ->
     call(User, Fun(User, Params)).
 
 call(User, Request) ->
-    Workers = reddit_engine:num_workers(),
-    Name = reddit_engine:worker_name(erlang:phash2(User, Workers) + 1),
-    normalize(gen_server:call(Name, Request, 30000)).
+    normalize(reddit_engine:call(User, Request)).
 
 normalize(ok) -> {200, #{ok => true}};
 normalize({ok, Value}) -> {200, Value};

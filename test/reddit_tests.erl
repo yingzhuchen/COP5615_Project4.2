@@ -23,6 +23,18 @@ engine_test_() ->
      fun(_) -> reddit_engine:stop() end,
      [fun live_notifications/0]}.
 
+-define(WS_PORT, 18089).
+
+websocket_test_() ->
+    {setup,
+     fun() ->
+             ok = reddit_engine:start(2, #{push_posts => true}),
+             {ok, _} = reddit_http:start(?WS_PORT),
+             ok
+     end,
+     fun(_) -> reddit_http:stop(), reddit_engine:stop() end,
+     [fun websocket_session/0]}.
+
 users(Names) -> [ok = reddit_ops:register_user(N) || N <- Names].
 
 accounts() ->
@@ -163,3 +175,88 @@ live_notifications() ->
     after 200 -> ok
     end,
     ?assertMatch({ok, [_, _]}, Call(<<"eve">>, {get_dms, <<"eve">>, 10})).
+
+%% ---------------------------------------------------------- JSON, WebSocket
+
+json_decode_test() ->
+    ?assertEqual({ok, #{<<"a">> => [1, -2.5, true, false, null, <<"x\"y\n", 16#e9/utf8>>],
+                        <<"b">> => #{}}},
+                 reddit_json:decode(<<" {\"a\": [1, -2.5, true, false, null, "
+                                      "\"x\\\"y\\n\\u00e9\"], \"b\": {}} ">>)),
+    ?assertEqual({ok, <<16#1F600/utf8>>}, reddit_json:decode(<<"\"\\ud83d\\ude00\"">>)),
+    ?assertEqual({ok, 1000.0}, reddit_json:decode(<<"1e3">>)),
+    [?assertEqual({error, invalid_json}, reddit_json:decode(Bad))
+     || Bad <- [<<"{\"a\":1,}">>, <<"[1,]">>, <<"tru">>, <<"\"open">>, <<"1 2">>, <<>>]].
+
+json_roundtrip_test() ->
+    %% Control characters must be escaped for the output to be valid JSON.
+    Term = #{<<"text">> => <<"ctrl", 1, " tab\t \"q\" \\ ", 16#4e16/utf8>>,
+             <<"n">> => -3, <<"list">> => [<<>>, 7]},
+    Encoded = reddit_json:encode(Term),
+    ?assertEqual(nomatch, binary:match(Encoded, <<1>>)),
+    ?assertEqual({ok, Term}, reddit_json:decode(Encoded)).
+
+ws_frame_test() ->
+    %% Example handshake from RFC 6455, section 1.3.
+    ?assertEqual(<<"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=">>,
+                 reddit_ws:accept_key(<<"dGhlIHNhbXBsZSBub25jZQ==">>)),
+    [begin
+         Payload = binary:copy(<<"ab">>, Size),
+         Frame = reddit_ws:encode_frame(1, Payload, Masked),
+         ?assertEqual({frame, 1, 1, Payload, <<"rest">>},
+                      reddit_ws:decode_frame(<<Frame/binary, "rest">>)),
+         ?assertEqual(more, reddit_ws:decode_frame(binary:part(Frame, 0, byte_size(Frame) - 1)))
+     end || Size <- [0, 3, 100, 40000], Masked <- [true, false]].
+
+wait_listening(Port, 0) -> error({not_listening, Port});
+wait_listening(Port, N) ->
+    case gen_tcp:connect("localhost", Port, []) of
+        {ok, S} -> gen_tcp:close(S);
+        {error, _} -> timer:sleep(50), wait_listening(Port, N - 1)
+    end.
+
+ws_push(Conn, Type) ->
+    receive {reddit_ws_push, Conn, Type, Data} -> Data
+    after 1000 -> error({no_push, Type})
+    end.
+
+websocket_session() ->
+    wait_listening(?WS_PORT, 40),
+    Url = "ws://localhost:" ++ integer_to_list(?WS_PORT) ++ "/ws",
+    {ok, A} = reddit_ws_client:connect(Url),
+    {ok, B} = reddit_ws_client:connect(Url),
+    R = fun reddit_ws_client:request/3,
+    ?assertEqual({error, <<"not_logged_in">>}, R(A, get_feed, #{})),
+    ok = R(A, register, #{user => <<"wsa">>}),
+    ok = R(B, register, #{user => <<"wsb">>}),
+    ?assertEqual({error, <<"no_such_user">>}, R(A, login, #{user => <<"nobody">>})),
+    {ok, #{<<"user">> := <<"wsa">>}} = R(A, login, #{user => <<"wsa">>}),
+    {ok, _} = R(B, login, #{user => <<"wsb">>}),
+    ok = R(A, create_sub, #{sub => <<"ws">>}),
+    ok = R(B, join_sub, #{sub => <<"ws">>}),
+    {ok, #{<<"id">> := P}} = R(A, post, #{sub => <<"ws">>, title => <<"t">>, body => <<"b">>}),
+    #{<<"id">> := P, <<"author">> := <<"wsa">>} = ws_push(B, <<"new_post">>),
+    {ok, #{<<"id">> := C}} = R(B, comment, #{parent_id => P, body => <<"c">>}),
+    #{<<"comment_id">> := C, <<"from">> := <<"wsb">>} = ws_push(A, <<"reply">>),
+    ok = R(B, vote, #{item_id => P, direction => <<"up">>}),
+    {ok, #{<<"score">> := 1, <<"comments">> := [#{<<"id">> := C}]}} =
+        R(A, get_post, #{post_id => P}),
+    {ok, [#{<<"id">> := P}]} = R(B, get_feed, #{sort => <<"new">>}),
+    {ok, #{<<"total">> := 1}} = R(A, get_karma, #{}),
+    %% A message over 64 KB uses the 64-bit frame length in both directions.
+    Big = binary:copy(<<"0123456789">>, 7000),
+    {ok, #{<<"id">> := Dm}} = R(B, send_dm, #{to => <<"wsa">>, body => Big}),
+    #{<<"id">> := Dm, <<"from">> := <<"wsb">>} = ws_push(A, <<"dm">>),
+    {ok, [#{<<"body">> := Big}]} = R(A, get_dms, #{limit => 1}),
+    ?assertEqual({error, <<"unknown_action">>}, R(A, fly, #{})),
+    ?assertEqual({error, <<"missing field: sub">>}, R(A, join_sub, #{})),
+    ?assertEqual({error, <<"bad field: item_id">>},
+                 R(A, vote, #{item_id => <<"x">>, direction => <<"up">>})),
+    ok = R(A, logout, #{}),
+    {ok, _} = R(B, send_dm, #{to => <<"wsa">>, body => <<"offline">>}),
+    receive {reddit_ws_push, A, _, _} -> error(pushed_after_logout)
+    after 200 -> ok
+    end,
+    reddit_ws_client:close(A),
+    reddit_ws_client:close(B),
+    timer:sleep(100).
