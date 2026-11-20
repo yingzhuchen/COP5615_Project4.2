@@ -103,12 +103,19 @@ serve(Socket, Headers, Rest) ->
                                "Connection: Upgrade\r\n"
                                "Sec-WebSocket-Accept: ", accept_key(Key), "\r\n\r\n"]),
             S = #{socket => Socket, buf => <<>>, frag => undefined, user => undefined},
+            Peer = peer(Socket),
+            reddit_log:line("WS   connection opened from ~s", [Peer]),
             try
                 case frames(Rest, S) of
                     {ok, S1} -> loop(S1);
                     {close, _} -> ok
                 end
             after
+                reddit_log:line("WS   connection closed from ~s~ts",
+                                [Peer, case get(reddit_ws_user) of
+                                           undefined -> "";
+                                           U -> [" (", U, ")"]
+                                       end]),
                 logout_current(),
                 gen_tcp:close(Socket)
             end;
@@ -135,8 +142,31 @@ loop(S = #{socket := Sock}) ->
         {tcp_error, Sock, _} -> ok;
         {reddit_push, Event} ->
             send_json(Sock, push_message(Event)),
+            log_push(S, Event),
             loop(S)
     end.
+
+peer(Socket) ->
+    case inet:peername(Socket) of
+        {ok, {Ip, Port}} -> [inet:ntoa(Ip), ":", integer_to_list(Port)];
+        _ -> "unknown"
+    end.
+
+log_push(#{user := User}, Event) ->
+    {Type, Detail} = case Event of
+                         {dm, #{id := Id, from := From}} ->
+                             {"dm", [" #", integer_to_list(Id), " from ", From]};
+                         {reply, #{comment_id := C, from := From}} ->
+                             {"reply", [" comment #", integer_to_list(C), " from ", From]};
+                         {new_post, #{id := Id, author := A, sub := Sub}} ->
+                             {"new_post", [" #", integer_to_list(Id), " by ", A, " in r/", Sub]};
+                         _ ->
+                             {"other", ""}
+                     end,
+    reddit_log:line("WS   push ~s -> ~ts~ts", [Type, who(User), Detail]).
+
+who(undefined) -> "guest";
+who(User) -> User.
 
 frames(Data, S = #{buf := Buf}) ->
     parse(<<Buf/binary, Data/binary>>, S).
@@ -186,6 +216,7 @@ send_json(Sock, Term) ->
 message(Payload, S = #{socket := Sock}) ->
     case reddit_json:decode(Payload) of
         {ok, Msg = #{<<"action">> := Action}} when is_binary(Action) ->
+            T0 = erlang:monotonic_time(microsecond),
             Ref = maps:get(<<"ref">>, Msg, null),
             {Reply, S1} = try action(Action, Msg, S)
                           catch
@@ -193,6 +224,12 @@ message(Payload, S = #{socket := Sock}) ->
                               exit:{timeout, _} -> {{error, timeout}, S}
                           end,
             send_json(Sock, reply(Ref, Reply)),
+            %% e.g. [12:03:41.512] WS   carol: post sub=erlang title=Hi -> ok id=5 (0.9 ms)
+            reddit_log:line("WS   ~ts: ~ts~ts ->~ts (~.1f ms)",
+                            [who(maps:get(user, S)), Action,
+                             reddit_log:params(Msg),
+                             reddit_log:engine_result(log_reply(Reply)),
+                             (erlang:monotonic_time(microsecond) - T0) / 1000]),
             S1;
         {ok, _} ->
             send_json(Sock, reply(null, {error, missing_action})),
@@ -201,6 +238,9 @@ message(Payload, S = #{socket := Sock}) ->
             send_json(Sock, reply(null, {error, invalid_json})),
             S
     end.
+
+log_reply({error, Why}) -> {error, reason(Why)};
+log_reply(Reply) -> Reply.
 
 reply(Ref, ok) -> #{ref => Ref, ok => true};
 reply(Ref, {ok, Id}) when is_integer(Id) -> #{ref => Ref, ok => true, data => #{id => Id}};
@@ -245,6 +285,15 @@ action(<<"get_public_key">>, M, S) ->
     {reddit_engine:call(U, {get_public_key, U}), S};
 action(<<"get_post">>, M, S) ->
     {reddit_engine:call(<<>>, {get_post, <<>>, int(M, <<"post_id">>)}), S};
+action(<<"search">>, M, S) ->
+    Q = text(M, <<"q">>),
+    {reddit_engine:call(Q, {search, Q, int(M, <<"limit">>, 25)}), S};
+action(<<"list_subs">>, M, S) ->
+    Q = case maps:get(<<"q">>, M, null) of
+            B when is_binary(B) -> B;
+            _ -> <<>>
+        end,
+    {reddit_engine:call(Q, {list_subs, Q}), S};
 %% Everything else acts as the logged-in user.
 action(Action, M, S = #{user := User}) ->
     Req = user_request(Action, User, M),

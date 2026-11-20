@@ -1,16 +1,21 @@
-%% Interactive command-line Reddit client over WebSocket.
+%% Interactive command-line Reddit client, over WebSocket or REST.
 %%
-%%   ./run.sh ws [ws://localhost:8080/ws] [USER]
+%%   ./run.sh ws   [ws://localhost:8080/ws] [USER]     WebSocket mode
+%%   ./run.sh rest [http://localhost:8080]  [USER]     REST mode
 %%
 %% Run it in several terminals (one OS process each) to act as different
-%% users at the same time. Live notifications (new DMs, replies to your
-%% posts and comments, new posts in your subreddits) are printed as they
-%% arrive. Type `help` for the commands.
+%% users at the same time. Both modes accept the same commands (type `help`).
+%%
+%% WebSocket mode: live notifications (new DMs, replies to your posts and
+%% comments, new posts in your subreddits) are printed as they arrive.
+%% REST mode: every command is one or more HTTP requests to the REST API,
+%% each printed as it is sent; REST has no live notifications, so check
+%% `feed` and `inbox` for new items.
 %%
 %% `register` creates an RSA-2048 key pair, uploads the public key and keeps
 %% the private key in keys/<user>.pem; posts and reposts are then signed.
 -module(reddit_ws_cli).
--export([main/1, print_post_line/1, print_post/1, print_dms/1, print_push/3]).
+-export([main/1, main_rest/1, print_post_line/1, print_post/1, print_dms/1, print_push/3]).
 
 -define(KEY_DIR, "keys").
 
@@ -22,7 +27,7 @@ main([Url | Rest]) ->
     case reddit_ws_client:connect(Url, Printer) of
         {ok, Conn} ->
             io:format("Connected to ~s. Type 'help' for commands.~n", [Url]),
-            S0 = #{conn => Conn, printer => Printer, user => undefined,
+            S0 = #{transport => ws, conn => Conn, printer => Printer, user => undefined,
                    key => undefined, trace => false},
             S = case Rest of
                     [User | _] -> start_as(b(User), S0);
@@ -31,6 +36,29 @@ main([Url | Rest]) ->
             repl(S);
         {error, Reason} ->
             io:format("Cannot connect to ~s: ~p~n", [Url, Reason]),
+            halt(1)
+    end.
+
+main_rest([]) -> main_rest(["http://localhost:8080"]);
+main_rest([Base0 | Rest]) ->
+    io:setopts([{encoding, unicode}]),
+    application:ensure_all_started(public_key),
+    application:ensure_all_started(inets),
+    Base = string:trim(Base0, trailing, "/"),
+    S0 = #{transport => rest, base => Base, user => undefined, key => undefined,
+           trace => false},
+    case reddit_rest_client:call(Base, get, "/api/health", #{}) of
+        {200, _, _} ->
+            io:format("Connected to the REST API at ~s. Type 'help' for commands.~n"
+                      "Every HTTP request is shown as it is sent "
+                      "('trace on' also shows the JSON replies).~n", [Base]),
+            S = case Rest of
+                    [User | _] -> start_as(b(User), S0);
+                    [] -> S0
+                end,
+            repl(S);
+        Other ->
+            io:format("Cannot reach ~s: ~p~n", [Base, Other]),
             halt(1)
     end.
 
@@ -63,6 +91,8 @@ repl(S) ->
 prompt(#{user := undefined}) -> "> ";
 prompt(#{user := U}) -> [U, "> "].
 
+quit(#{transport := rest}) ->
+    halt(0);
 quit(#{conn := Conn, printer := Printer}) ->
     unlink(Printer),
     exit(Printer, kill),   % our own close is not "closed by the server"
@@ -186,6 +216,28 @@ command("key", [U], S) ->
     end,
     S;
 command("key", _, _) -> throw({usage, "key <user>"});
+command("search", Words, S) when Words =/= [] ->
+    case request(S, search, #{q => join(Words), limit => 10}) of
+        {ok, []} -> io:format("no posts match '~ts'~n", [join(Words)]);
+        {ok, Posts} ->
+            io:format("~b post(s) match '~ts', newest first:~n", [length(Posts), join(Words)]),
+            [print_post_line(P) || P <- Posts];
+        Other -> show(Other)
+    end,
+    S;
+command("search", _, _) -> throw({usage, "search <words...>"});
+command("subs", Words, S) ->
+    Params = case Words of [] -> #{}; _ -> #{q => join(Words)} end,
+    case request(S, list_subs, Params) of
+        {ok, []} -> io:format("no subreddits found~n");
+        {ok, Subs} ->
+            [io:format("  r/~ts  ~b member(s), created by ~ts~n",
+                       [g(X, name), g(X, members), g(X, creator)]) || X <- Subs];
+        Other -> show(Other)
+    end,
+    S;
+command("trace", [OnOff], S = #{transport := rest}) ->
+    S#{trace => OnOff =:= <<"on">>};
 command("trace", [OnOff], S = #{conn := Conn}) ->
     On = OnOff =:= <<"on">>,
     reddit_ws_client:set_trace(Conn, On, label(S)),
@@ -201,7 +253,9 @@ command(Cmd, _, S) ->
 help() ->
     io:format(
       "  register <user>                      create an account (RSA-2048 key) and log in~n"
-      "  login <user> | logout                start / end your live session~n"
+      "  login <user> | logout                start / end your session~n"
+      "  subs [word]                          list subreddits, or search them by name~n"
+      "  search <words>                       search all posts by title and text~n"
       "  create|join|leave <subreddit>~n"
       "  post <subreddit> \"<title>\" <text>    signed text post~n"
       "  repost <post_id> <subreddit>~n"
@@ -212,7 +266,7 @@ help() ->
       "  karma [user]~n"
       "  dm <user> <text> | reply <message_id> <text> | inbox [limit]~n"
       "  key <user>                           a user's public key~n"
-      "  trace on|off                         print the raw WebSocket JSON frames~n"
+      "  trace on|off                         print the raw JSON messages~n"
       "  wait [ms] | quit~n").
 
 %% ----------------------------------------------------------------- session
@@ -236,17 +290,23 @@ register_user(User, S) ->
             S
     end.
 
-after_login(User, S = #{conn := Conn}) ->
+after_login(User, S) ->
     Key = case maps:get(key, S) of
               undefined -> load_key(User);
               K -> K
           end,
-    reddit_ws_client:set_trace(Conn, maps:get(trace, S), User),
-    io:format("logged in as ~ts - live notifications on, posts ~ts~n",
-              [User, case Key of
-                         undefined -> "unsigned (no private key on this machine)";
-                         _ -> "signed"
-                     end]),
+    Live = case S of
+               #{transport := ws, conn := Conn} ->
+                   reddit_ws_client:set_trace(Conn, maps:get(trace, S), User),
+                   "live notifications on";
+               #{transport := rest} ->
+                   "REST mode, check feed/inbox for new items"
+           end,
+    io:format("logged in as ~ts - ~s, posts ~ts~n",
+              [User, Live, case Key of
+                               undefined -> "unsigned (no private key on this machine)";
+                               _ -> "signed"
+                           end]),
     S#{user => User, key => Key}.
 
 signed(#{key := undefined}, Params, _, _, _) -> Params;
@@ -286,6 +346,8 @@ label(#{user := undefined}) -> <<"ws">>;
 label(#{user := U}) -> U.
 
 %% login answers {ok, #{user => U}}; map it to one atom for the callers.
+request(S = #{transport := rest}, Action, Params) ->
+    rest_request(S, Action, Params);
 request(#{conn := Conn}, login, Params) ->
     case reddit_ws_client:request(Conn, login, Params) of
         {ok, _} -> ok_logged_in;
@@ -293,6 +355,91 @@ request(#{conn := Conn}, login, Params) ->
     end;
 request(#{conn := Conn}, Action, Params) ->
     reddit_ws_client:request(Conn, Action, Params).
+
+%% ------------------------------------------------------------ REST mode
+
+%% Same actions and results as the WebSocket client, sent to the REST API.
+rest_request(_S, logout, _) ->
+    ok;
+rest_request(S = #{user := User}, Action, Params) ->
+    case rest_route(Action, User, Params) of
+        not_logged_in ->
+            {error, <<"not_logged_in">>};
+        {Method, Path, Args} ->
+            Result = rest_result(rest_http(S, Method, Path, Args)),
+            case {Action, Result} of
+                {login, {ok, _}} -> ok_logged_in;   % the user exists
+                _ -> Result
+            end
+    end.
+
+%% Action -> {Method, Path, Parameters}. REST is stateless, so the acting
+%% user is sent with every request; `login` only checks that the user exists.
+rest_route(register, _, P) -> {post, "/api/users", P};
+rest_route(login, _, #{user := U}) -> {get, "/api/karma", #{user => U}};
+rest_route(get_post, _, #{post_id := Id}) -> {get, "/api/posts/" ++ integer_to_list(Id), #{}};
+rest_route(get_public_key, _, #{user := U}) ->
+    {get, "/api/users/" ++ reddit_rest_client:url_encode(U) ++ "/public_key", #{}};
+rest_route(search, _, P) -> {get, "/api/search", P};
+rest_route(list_subs, _, P) -> {get, "/api/subreddits", P};
+rest_route(_, undefined, _) -> not_logged_in;
+rest_route(create_sub, U, P) -> {post, "/api/subreddits/create", P#{user => U}};
+rest_route(join_sub, U, P) -> {post, "/api/subreddits/join", P#{user => U}};
+rest_route(leave_sub, U, P) -> {post, "/api/subreddits/leave", P#{user => U}};
+rest_route(post, U, P) -> {post, "/api/posts", P#{user => U}};
+rest_route(repost, U, P) -> {post, "/api/reposts", P#{user => U}};
+rest_route(comment, U, P) -> {post, "/api/comments", P#{user => U}};
+rest_route(vote, U, P) -> {post, "/api/votes", P#{user => U}};
+rest_route(get_feed, U, P) -> {get, "/api/feed", P#{user => U}};
+rest_route(get_karma, U, P) -> {get, "/api/karma", #{user => maps:get(user, P, U)}};
+rest_route(send_dm, U, P) -> {post, "/api/messages", P#{user => U}};
+rest_route(reply_dm, U, P) -> {post, "/api/messages/reply", P#{user => U}};
+rest_route(get_dms, U, P) -> {get, "/api/messages", P#{user => U}}.
+
+%% Send one request and print it, e.g.
+%%   [REST] POST /api/posts -> 200 5 (2.1 ms)
+rest_http(#{base := Base, trace := Trace}, Method, Path, Args) ->
+    Reply = reddit_rest_client:call(Base, Method, Path, Args),
+    Verb = string:uppercase(atom_to_list(Method)),
+    Shown = case Method of
+                get -> [Path, reddit_rest_client:query_string(Args)];
+                post -> Path
+            end,
+    case Reply of
+        {Status, Body, Micros} ->
+            io:format("  [REST] ~s ~ts -> ~b ~ts (~.1f ms)~n",
+                      [Verb, Shown, Status, short(Body, case Trace of true -> 400; false -> 60 end),
+                       Micros / 1000]),
+            Trace andalso Method =:= post andalso
+                io:format("         body: ~ts~n",
+                          [short(iolist_to_binary(reddit_rest_client:form(Args)), 400)]);
+        {error, Why} ->
+            io:format("  [REST] ~s ~ts -> failed: ~p~n", [Verb, Shown, Why])
+    end,
+    Reply.
+
+%% The REST replies, converted to the shapes the WebSocket client returns.
+rest_result({error, Why}) ->
+    {error, iolist_to_binary(io_lib:format("~p", [Why]))};
+rest_result({Status, Body, _}) ->
+    case reddit_json:decode(Body) of
+        {ok, #{<<"error">> := Why}} -> {error, Why};
+        {ok, _} when Status >= 400 -> {error, iolist_to_binary(io_lib:format("HTTP ~b", [Status]))};
+        {ok, #{<<"ok">> := true} = M} when map_size(M) =:= 1 -> ok;
+        {ok, Id} when is_integer(Id) -> {ok, #{<<"id">> => Id}};
+        {ok, Value} -> {ok, Value};
+        {error, _} -> {error, <<"invalid reply from server">>}
+    end.
+
+short(Bin, Max) ->
+    Text = case unicode:characters_to_list(Bin) of
+               L when is_list(L) -> L;
+               _ -> binary_to_list(Bin)
+           end,
+    case length(Text) > Max of
+        true -> lists:sublist(Text, Max) ++ "...";
+        false -> Text
+    end.
 
 show(ok) -> io:format("ok~n");
 show({ok, Data}) -> io:format("ok ~ts~n", [reddit_json:encode(Data)]);

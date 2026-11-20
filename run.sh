@@ -6,9 +6,10 @@
 #   ./run.sh sim [key value ...]        engine + client processes on this machine
 #   ./run.sh engine clients N [...]     engine only; waits for N external clients
 #   ./run.sh client ENGINE_NODE         one client process (e.g. engine@myhost)
-#   ./run.sh api [PORT]                 engine + REST API server
+#   ./run.sh api [PORT] [log false]     engine + REST API + WebSocket server
 #   ./run.sh demo [BASE_URL]            REST API client demonstration
-#   ./run.sh ws [WS_URL] [USER]         interactive WebSocket client
+#   ./run.sh rest [BASE_URL] [USER]     interactive client over the REST API
+#   ./run.sh ws [WS_URL] [USER]         interactive client over WebSocket
 #   ./run.sh wsdemo [WS_URL]            scripted multi-client WebSocket demo
 #
 # Example: ./run.sh sim users 20000 clients 4 duration 60
@@ -49,6 +50,10 @@ case "$cmd" in
     demo)
         build
         erl -noshell -pa ebin -run reddit_rest_demo main "$@"
+        ;;
+    rest)
+        build
+        erl -noshell -pa ebin -run reddit_ws_cli main_rest "$@"
         ;;
     ws)
         build

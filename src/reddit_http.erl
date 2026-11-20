@@ -42,28 +42,48 @@ accept(Socket) ->
     end.
 
 handle(Socket) ->
-    Result = try
-                 case read_request(Socket) of
-                     {ok, Method, Path, Query, Body} ->
-                         route(Method, Path, Query, Body);
-                     {upgrade, <<"/ws">>, Headers, Rest} ->
-                         {websocket, Headers, Rest};
-                     {upgrade, _Path, _Headers, _Rest} ->
-                         {404, #{error => not_found}};
-                     _ ->
-                         {400, #{error => bad_request}}
-                 end
-             catch
-                 throw:{bad_request, Reason} -> {bad_request, Reason};
-                 error:Reason -> {500, #{error => iolist_to_binary(
-                                                   io_lib:format("~p", [Reason]))}}
-             end,
-    case Result of
-        {websocket, WsHeaders, WsRest} ->
-            reddit_ws:serve(Socket, WsHeaders, WsRest);
-        _ ->
+    T0 = erlang:monotonic_time(microsecond),
+    case read(Socket) of
+        {ok, Method, Path, Query, Body} ->
+            Result = respond(Method, Path, Query, Body),
             send_response(Socket, Result),
+            gen_tcp:close(Socket),
+            log_request(Method, Path, Query, Body, Result, T0);
+        {upgrade, <<"/ws">>, Headers, Rest} ->
+            reddit_ws:serve(Socket, Headers, Rest);
+        {upgrade, _Path, _Headers, _Rest} ->
+            send_response(Socket, {404, #{error => not_found}}),
+            gen_tcp:close(Socket);
+        _ ->
+            send_response(Socket, {400, #{error => bad_request}}),
             gen_tcp:close(Socket)
+    end.
+
+read(Socket) ->
+    try read_request(Socket)
+    catch _:_ -> {error, bad_request}
+    end.
+
+respond(Method, Path, Query, Body) ->
+    try route(Method, Path, Query, Body)
+    catch
+        throw:{bad_request, Reason} -> {bad_request, Reason};
+        error:Reason -> {500, #{error => iolist_to_binary(io_lib:format("~p", [Reason]))}}
+    end.
+
+%% One line per request in the server window, e.g.
+%%   [12:03:41.512] REST POST /api/posts user=carol sub=erlang -> 200 id=5 (1.2 ms)
+log_request(Method, Path, Query, Body, Result, T0) ->
+    case reddit_log:enabled() of
+        false ->
+            ok;
+        true ->
+            Params = maps:merge(Query, try parse_params(Body) catch _:_ -> #{} end),
+            {Status, Summary} = reddit_log:http_result(Result),
+            reddit_log:line("REST ~-4s ~s~ts -> ~b~ts (~.1f ms)",
+                            [string:uppercase(atom_to_list(Method)), Path,
+                             reddit_log:params(Params), Status, Summary,
+                             (erlang:monotonic_time(microsecond) - T0) / 1000])
     end.
 
 read_request(Socket) ->
@@ -127,6 +147,12 @@ split_target(Target) ->
 
 route(get, <<"/api/health">>, _Query, _Body) ->
     {200, #{status => <<"ok">>}};
+route(get, <<"/api/search">>, Query, _Body) ->
+    Q = required(Query, <<"q">>),
+    call(Q, {search, Q, int(maps:get(<<"limit">>, Query, <<"25">>))});
+route(get, <<"/api/subreddits">>, Query, _Body) ->
+    Q = maps:get(<<"q">>, Query, <<>>),
+    call(Q, {list_subs, Q});
 route(get, <<"/api/feed">>, Query, _Body) ->
     with_user(Query, fun(User) ->
         call(User, {get_feed, User, int(maps:get(<<"limit">>, Query, <<"25">>)),

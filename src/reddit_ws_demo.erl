@@ -82,6 +82,15 @@ main([Url | _]) ->
     expect(A, get_karma, #{}),
     expect(C, get_karma, #{user => Bob}),
 
+    step("search: carol looks up subreddits by name and posts by keyword", []),
+    Subs = expect(C, list_subs, #{q => <<"websockets">>}),
+    [io:format("  r/~ts  ~b member(s)~n", [maps:get(<<"name">>, X), maps:get(<<"members">>, X)])
+     || X <- Subs],
+    Found = expect(C, search, #{q => <<"hello websocket">>, limit => 5}),
+    [reddit_ws_cli:print_post_line(P) || P <- Found],
+    length(Found) >= 2 orelse
+        fail("search found ~b posts, expected the post and its repost", [length(Found)]),
+
     step("direct messages: alice -> bob (live), bob reads and replies (live)", []),
     expect(A, send_dm, #{to => Bob, body => <<"Thanks for the comment!">>}),
     push(B, Bob, <<"dm">>),

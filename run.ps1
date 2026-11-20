@@ -5,9 +5,10 @@
 #   .\run.ps1 sim [key value ...]        engine + client processes on this machine
 #   .\run.ps1 engine clients N [...]     engine only; waits for N external clients
 #   .\run.ps1 client ENGINE_NODE         one client process (e.g. engine@myhost)
-#   .\run.ps1 api [PORT]                 engine + REST API + WebSocket server
+#   .\run.ps1 api [PORT] [log false]     engine + REST API + WebSocket server
 #   .\run.ps1 demo [BASE_URL]            REST API client demonstration
-#   .\run.ps1 ws [WS_URL] [USER]         interactive WebSocket client
+#   .\run.ps1 rest [BASE_URL] [USER]     interactive client over the REST API
+#   .\run.ps1 ws [WS_URL] [USER]         interactive client over WebSocket
 #   .\run.ps1 wsdemo [WS_URL]            scripted multi-client WebSocket demo
 #
 # Example: .\run.ps1 sim users 20000 clients 4 duration 60
@@ -51,6 +52,10 @@ switch ($Cmd) {
     "demo" {
         Build
         erl -noshell -pa ebin -run reddit_rest_demo main @Rest
+    }
+    "rest" {
+        Build
+        erl -noshell -pa ebin -run reddit_ws_cli main_rest @Rest
     }
     "ws" {
         Build

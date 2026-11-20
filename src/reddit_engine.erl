@@ -114,6 +114,8 @@ request({vote, U, Item, Dir}) -> reddit_ops:vote(U, Item, Dir);
 request({get_karma, U}) -> reddit_ops:get_karma(U);
 request({get_feed, U, Limit, Sort}) -> reddit_ops:get_feed(U, Limit, Sort);
 request({get_post, _U, PostId}) -> reddit_ops:get_post(PostId);
+request({search, Query, Limit}) -> reddit_ops:search_posts(Query, Limit);
+request({list_subs, Query}) -> reddit_ops:list_subs(Query);
 request({send_dm, U, To, Body}) ->
     after_dm(reddit_ops:send_dm(U, To, Body), To);
 request({reply_dm, U, DmId, Body}) ->

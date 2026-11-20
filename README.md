@@ -143,6 +143,19 @@ Supported endpoints:
 | POST | `/api/messages/reply` | Reply to a direct message |
 | GET | `/api/messages?user=...` | List direct messages |
 | GET | `/api/users/<user>/public_key` | Get a user's PEM RSA public key |
+| GET | `/api/search?q=...&limit=...` | Search all posts: every word must appear in the title or body (case-insensitive), newest first |
+| GET | `/api/subreddits?q=...` | List subreddits (all, or those whose name contains every word), largest first |
+
+**Server log.** The server prints one line per REST request, WebSocket
+message and live push, so the communication can be followed as it happens
+(`./run.sh api 8080 log false` turns this off):
+
+```
+[12:03:41.512] REST POST /api/posts user=carol sub=cop5615 title=Hello +signature +body -> 200 id=5 (1.2 ms)
+[12:03:41.530] REST GET  /api/search q=hello limit=10 -> 200 (2 items) (0.8 ms)
+[12:03:42.101] WS   dave: comment parent_id=5 +body -> ok id=6 (0.4 ms)
+[12:03:42.102] WS   push reply -> carol comment #6 from dave
+```
 
 Bonus registration and posting parameters:
 
@@ -153,6 +166,23 @@ Bonus registration and posting parameters:
 The REST server calls the existing engine workers, so the engine remains
 separate from the client and transport layer. `src/reddit_rest_client.erl`
 is the simple client used by the demo and logs each REST operation.
+
+**Interactive REST client.** The interactive client (below) also runs over
+REST: every command becomes one or more HTTP requests, each printed as it
+is sent. REST has no live notifications, so use `feed` and `inbox` to see
+new items.
+
+```bash
+./run.sh rest http://localhost:8080             # then: register carol
+./run.sh rest http://localhost:8080 dave        # log in, or register if new
+```
+
+```
+carol> search hello
+  [REST] GET /api/search?limit=10&q=hello -> 200 [{"id":1,"up":0,"down":0,"sub":"cop5615","signature":"Uq7qhp... (1.5 ms)
+1 post(s) match 'hello', newest first:
+  #1 r/cop5615  "Hello" by carol  score 0 (+0/-0)  0 comments  [signature valid]
+```
 
 ## Project 4.2 WebSocket interface
 
@@ -183,6 +213,8 @@ through `get_feed` and `get_dms` when they log in again.
 | `login` / `logout` | `user` / – | no |
 | `get_post` | `post_id` (post with its comment tree and `signature_status`) | no |
 | `get_public_key` | `user` | no |
+| `search` | `q`, optional `limit` (posts matching every word) | no |
+| `list_subs` | optional `q` (subreddits whose name matches) | no |
 | `create_sub`, `join_sub`, `leave_sub` | `sub` | yes |
 | `post` | `sub`, `title`, `body`, optional `signature` | yes |
 | `repost` | `sub`, `post_id`, optional `signature` | yes |
@@ -200,11 +232,12 @@ by default, `push_posts false` turns them off):
 ```
 
 **Interactive client.** Run it in several terminals; each one is a separate
-client OS process. Given a user name, it logs in, or registers first if
-the user is new. Registering creates an RSA-2048 key pair, uploads the
-public key and saves the private key in `keys/<user>.pem`, so later posts
-are signed. Type `help` for the commands and `trace on` to see the raw
-JSON frames.
+client OS process. Create an account with `register <user>`, or pass a user
+name on the command line to log in (registering first if the user is new).
+Registering creates an RSA-2048 key pair, uploads the public key and saves
+the private key in `keys/<user>.pem`, so later posts are signed. `subs`
+lists subreddits and `search <words>` searches all posts. Type `help` for
+the commands and `trace on` to see the raw JSON frames.
 
 ```bash
 ./run.sh ws ws://localhost:8080/ws alice     # terminal 2
@@ -231,8 +264,8 @@ printed. It exits with status 0 when everything worked.
 ./run.sh wsdemo ws://localhost:8080/ws
 ```
 
-On Windows PowerShell use `.\run.ps1 api 8080`, `.\run.ps1 ws ...` and
-`.\run.ps1 wsdemo ...`. If PowerShell reports that running scripts is
+On Windows PowerShell use `.\run.ps1 api 8080`, `.\run.ps1 ws ...`,
+`.\run.ps1 rest ...` and `.\run.ps1 wsdemo ...`. If PowerShell reports that running scripts is
 disabled, use Git Bash with `./run.sh`, or start the script with
 `powershell -ExecutionPolicy Bypass -File .\run.ps1 ...`.
 

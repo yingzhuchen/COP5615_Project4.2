@@ -15,7 +15,8 @@ ops_test_() ->
       fun votes_and_karma/0,
       fun reposts/0,
       fun signed_posts/0,
-      fun direct_messages/0]}.
+      fun direct_messages/0,
+      fun search/0]}.
 
 engine_test_() ->
     {setup,
@@ -33,7 +34,7 @@ websocket_test_() ->
              ok
      end,
      fun(_) -> reddit_http:stop(), reddit_engine:stop() end,
-     [fun websocket_session/0, fun burst_connections/0]}.
+     [fun websocket_session/0, fun burst_connections/0, fun rest_session/0]}.
 
 users(Names) -> [ok = reddit_ops:register_user(N) || N <- Names].
 
@@ -288,3 +289,71 @@ health_check(Port) ->
         Error ->
             Error
     end.
+
+%% ------------------------------------------------------------------ search
+
+search() ->
+    users([<<"alice">>, <<"bob">>]),
+    ok = reddit_ops:create_sub(<<"alice">>, <<"erlang">>),
+    ok = reddit_ops:create_sub(<<"bob">>, <<"elixir">>),
+    ok = reddit_ops:join_sub(<<"bob">>, <<"erlang">>),
+    {ok, P1} = reddit_ops:create_post(<<"alice">>, <<"erlang">>, <<"Hello OTP">>,
+                                      <<"gen_server tips">>),
+    {ok, P2} = reddit_ops:create_post(<<"bob">>, <<"elixir">>, <<"Phoenix">>,
+                                      <<"hello from elixir">>),
+    {ok, _} = reddit_ops:create_post(<<"bob">>, <<"erlang">>, <<"ETS">>, <<"tables">>),
+    Ids = fun({ok, Posts}) -> [Id || #{id := Id} <- Posts] end,
+    ?assertEqual([P2, P1], Ids(reddit_ops:search_posts(<<"HELLO">>, 10))),  % all subs, newest first
+    ?assertEqual([P1], Ids(reddit_ops:search_posts(<<"hello gen_server">>, 10))),  % every word
+    ?assertEqual([P2], Ids(reddit_ops:search_posts(<<"hello">>, 1))),
+    ?assertEqual([], Ids(reddit_ops:search_posts(<<"nothing">>, 10))),
+    ?assertEqual({error, empty_query}, reddit_ops:search_posts(<<"  ">>, 10)),
+    {ok, All} = reddit_ops:list_subs(<<>>),
+    ?assertEqual([<<"erlang">>, <<"elixir">>], [N || #{name := N} <- All]),  % most members first
+    ?assertMatch({ok, [#{name := <<"elixir">>, members := 1, creator := <<"bob">>}]},
+                 reddit_ops:list_subs(<<"ELIX">>)).
+
+%% The REST endpoints through the generic client, and search over WebSocket.
+rest_session() ->
+    wait_listening(?WS_PORT, 40),
+    Base = "http://localhost:" ++ integer_to_list(?WS_PORT),
+    Call = fun(Method, Path, Params) ->
+                   {Status, Body, _Micros} = reddit_rest_client:call(Base, Method, Path, Params),
+                   {ok, Value} = reddit_json:decode(Body),
+                   {Status, Value}
+           end,
+    U = <<"resta">>,
+    Sub = <<"rest sub">>,
+    Text = <<"\x{fc}ber & = + % ?"/utf8>>,
+    ?assertEqual({200, #{<<"ok">> => true}}, Call(post, "/api/users", #{user => U})),
+    ?assertEqual({400, #{<<"error">> => <<"already_registered">>}},
+                 Call(post, "/api/users", #{user => U})),
+    {200, _} = Call(post, "/api/subreddits/create", #{user => U, sub => Sub}),
+    {200, PostId} = Call(post, "/api/posts", #{user => U, sub => Sub,
+                                               title => <<"Searchable title">>, body => Text}),
+    ?assert(is_integer(PostId)),
+    {200, #{<<"body">> := Text}} = Call(get, "/api/posts/" ++ integer_to_list(PostId), #{}),
+    {200, [#{<<"id">> := PostId}]} = Call(get, "/api/search", #{q => <<"SEARCHABLE">>}),
+    {400, _} = Call(get, "/api/search", #{}),
+    {200, [#{<<"name">> := Sub, <<"members">> := 1}]} =
+        Call(get, "/api/subreddits", #{q => <<"rest">>}),
+    {ok, C} = reddit_ws_client:connect("ws://localhost:" ++ integer_to_list(?WS_PORT) ++ "/ws"),
+    ?assertMatch({ok, [#{<<"id">> := PostId}]},
+                 reddit_ws_client:request(C, search, #{q => <<"searchable">>})),
+    ?assertMatch({ok, [#{<<"name">> := Sub}]},
+                 reddit_ws_client:request(C, list_subs, #{q => <<"rest s">>})),
+    ?assertMatch({error, _}, reddit_ws_client:request(C, search, #{})),
+    reddit_ws_client:close(C).
+
+log_format_test() ->
+    Flat = fun(IoData) -> unicode:characters_to_list(IoData) end,
+    ?assertEqual(" user=carol title=\"Hello world\" +signature +body",
+                 Flat(reddit_log:params(#{<<"user">> => <<"carol">>,
+                                          <<"title">> => <<"Hello world">>,
+                                          <<"signature">> => <<"x">>,
+                                          <<"body">> => <<"secret">>}))),
+    {200, IdSummary} = reddit_log:http_result({200, 5}),
+    ?assertEqual(" id=5", Flat(IdSummary)),
+    {400, Error} = reddit_log:http_result({400, #{error => <<"not_member">>}}),
+    ?assertEqual(" not_member", Flat(Error)),
+    ?assertEqual(" ok (2 items)", Flat(reddit_log:engine_result({ok, [a, b]}))).

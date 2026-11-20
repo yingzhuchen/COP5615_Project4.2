@@ -13,6 +13,7 @@
          create_post/4, create_signed_post/5, repost/3, repost_signed/4,
          comment/3, vote/3, get_karma/1,
          get_feed/3, get_post/1, post_view/1, item_author/1,
+         search_posts/2, list_subs/1,
          send_dm/3, reply_dm/3, get_dms/2,
          connect/2, disconnect/1, online_pid/1,
          count/2, counter/1]).
@@ -342,6 +343,54 @@ latest_ids(Table, Prefix, {Prefix, Id} = Key, N, Acc) ->
     latest_ids(Table, Prefix, ets:prev(Table, Key), N - 1, [Id | Acc]);
 latest_ids(_, _, _, _, Acc) ->
     lists:reverse(Acc).
+
+%% ------------------------------------------------------------------ search
+
+%% Posts in any subreddit whose title or body contains every word of Query
+%% (case-insensitive), newest first.
+search_posts(Query, Limit) ->
+    case words(Query) of
+        [] ->
+            {error, empty_query};
+        Words ->
+            Ids = ets:foldl(fun({Id, #post{title = T, body = B}}, Acc) ->
+                                    case matches(<<T/binary, " ", B/binary>>, Words) of
+                                        true -> [Id | Acc];
+                                        false -> Acc
+                                    end
+                            end, [], reddit_posts),
+            Newest = lists:sublist(lists:reverse(lists:sort(Ids)), Limit),
+            {ok, [V || Id <- Newest, V <- [post_view(Id)], V =/= undefined]}
+    end.
+
+%% Subreddits whose name contains every word of Query (all of them for an
+%% empty query), largest first.
+list_subs(Query) ->
+    Words = words(Query),
+    Subs = [#{name => Sub, creator => Creator, members => sub_member_count(Sub)}
+            || {Sub, Creator, _Created} <- ets:tab2list(reddit_subs),
+               matches(Sub, Words)],
+    {ok, lists:sort(fun(#{members := A, name := NA}, #{members := B, name := NB}) ->
+                            {A, NB} >= {B, NA}
+                    end, Subs)}.
+
+words(Query) when is_binary(Query) ->
+    [W || W <- string:lexemes(fold(Query), " \t"), W =/= <<>>];
+words(_) ->
+    [].
+
+matches(Text, Words) ->
+    Folded = fold(Text),
+    lists:all(fun(W) -> binary:match(Folded, W) =/= nomatch end, Words).
+
+%% Case-folded copy of a UTF-8 binary (unchanged if it is not valid UTF-8).
+fold(Bin) ->
+    try unicode:characters_to_binary(string:casefold(Bin)) of
+        Folded when is_binary(Folded) -> Folded;
+        _ -> Bin
+    catch
+        _:_ -> Bin
+    end.
 
 %% ---------------------------------------------------------- direct messages
 
