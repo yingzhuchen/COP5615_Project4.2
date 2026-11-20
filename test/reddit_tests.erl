@@ -334,7 +334,7 @@ rest_session() ->
     ?assert(is_integer(PostId)),
     {200, #{<<"body">> := Text}} = Call(get, "/api/posts/" ++ integer_to_list(PostId), #{}),
     {200, [#{<<"id">> := PostId}]} = Call(get, "/api/search", #{q => <<"SEARCHABLE">>}),
-    {400, _} = Call(get, "/api/search", #{}),
+    ?assertEqual({400, #{<<"error">> => <<"missing field: q">>}}, Call(get, "/api/search", #{})),
     {200, [#{<<"name">> := Sub, <<"members">> := 1}]} =
         Call(get, "/api/subreddits", #{q => <<"rest">>}),
     {ok, C} = reddit_ws_client:connect("ws://localhost:" ++ integer_to_list(?WS_PORT) ++ "/ws"),

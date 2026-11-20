@@ -241,6 +241,8 @@ normalize(Value) -> {200, Value}.
 
 send_response(Socket, {error, Reason}) ->
     send_response(Socket, {400, #{error => iolist_to_binary(io_lib:format("~p", [Reason]))}});
+send_response(Socket, {bad_request, {missing, Field}}) ->
+    send_response(Socket, {400, #{error => <<"missing field: ", Field/binary>>}});
 send_response(Socket, {bad_request, Reason}) ->
     send_response(Socket, {400, #{error => iolist_to_binary(io_lib:format("~p", [Reason]))}});
 send_response(Socket, {Status, Value}) ->

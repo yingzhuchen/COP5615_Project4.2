@@ -71,6 +71,7 @@ summary([_]) -> " (1 item)";
 summary(List) when is_list(List) -> io_lib:format(" (~b items)", [length(List)]);
 summary(_) -> "".
 
+reason({missing, Field}) when is_binary(Field) -> ["missing field: ", Field];
 reason(A) when is_atom(A) -> atom_to_list(A);
 reason(B) when is_binary(B) -> value(B);
 reason(Other) -> io_lib:format("~p", [Other]).
